@@ -1,0 +1,271 @@
+---
+title: "ECONOMETRICS Project"
+author: "Adityan Rajendran"
+date: "26/11/2019"
+output: pdf_document
+---
+# Exploratory Data Analysis
+
+```{r setup, include=FALSE}
+if(!require('pacman')) install.packages('pacman')
+pacman::p_load(ggplot2, foreign, e1071, psych, tidyverse, reshape, corrplot, lubridate, plm, lmtest)
+```
+
+
+```{r data import, echo=FALSE}
+options(scipen = 999)
+data <- as.data.frame(read.dta('guns.dta'))
+data$year <- as.integer(data$year + 1900)
+
+
+eda_custom <- function(df) {
+  sprintf('%f X %f',dim(df)[1], dim(df)[2])
+  eda_df <- data.frame(matrix(nrow=NCOL(df), ncol=0))
+  row.names(eda_df) <- colnames(df)
+  
+  eda_df$types <- sapply(df, typeof)
+  eda_df$nulls <- sapply(df, function(x) {sum(is.na(x))})
+  eda_df$skew <- sapply(df, skewness)
+  eda_df$min <- sapply(df, min)
+  eda_df$median <- sapply(df, median)
+  eda_df$max <- sapply(df, max)
+  eda_df$mean <- sapply(df, mean)
+  
+  
+  return(eda_df)
+}
+
+(eda_custom(data))
+```
+- We don't have any null values
+- All variables are numeric, being either int or double
+- Almost all the variables are skewed save 'year', 'avginc', 'pm1029' and 'stateid'
+
+
+```{r, fig.height = 6, echo=FALSE}
+multi.hist(data)
+```
+## Histograms of the variables
+
+
+```{r outlier detection,fig.height = 6, echo=FALSE}
+boxplot(data[-1])
+```
+ - Looks like we have a considerable amount of outliers in our data
+
+```{r correlation, fig.height = 6, echo=FALSE}
+corr <- round(cor(data[-1]),2)
+corrplot(corr, method = 'color', type='lower')
+```
+
+- 'rob' and 'vio' are the only variables with high correlation (0.91)
+- 'density' seems to be correlated with 'mur' and 'rob'(0.7 - 0.8)
+
+```{r eda, echo=FALSE}
+shall <- data[data$shall == 1,]
+no_shall <- data[data$shall == 0,]
+
+
+states_shall <- unique(shall$stateid)
+states_noshall <- unique(no_shall$stateid)
+
+commons <- intersect(states_shall, states_noshall)
+states_n <- setdiff(states_noshall, commons)
+states_s <- setdiff(states_shall, commons)
+```
+ - States which have implemented Shall-issue laws at some point of time: `r commons`
+ - States which have never implemented Shall-issue laws: `r states_n`
+ - States with shall-issue laws from the start(1977): `r states_s`
+ 
+# Model Implementation
+## Pooled OLS
+```{r data processing for Pooled OLS, echo=FALSE}
+#Dropping year, rob,mur, stateid
+data$year <- as.factor(data$year)
+data$stateid <- as.factor(data$stateid)
+proc_data <- data
+proc_data <- proc_data[-c(1,3,4,12)]
+```
+
+```{r Pooled OLS, echo=FALSE}
+pooled.ols <- plm(log(vio) ~ incarc_rate+pb1064+pw1064+pm1029+pop+avginc+density+shall, data = data, model = 'pooling', index = c("stateid","year"))
+summary(pooled.ols)
+ggplot(data, aes(shall, vio)) + geom_bar(stat='identity') +
+  xlab('Shall-issue laws') + ylab('Violent Crime Rate') + 
+  ggtitle('Violent Crime Rate (incidents/100k members) VS Shall-issue laws') + theme_bw()
+```
+Running a pooled OLS model gives us the following interpretations:
+
+- The model is significant with an F-statistic of 188.41
+- The estimates for 'pm1029', 'avginc' are insignificant at alpha = 5%
+- We can see that the estimate for 'shall' is negative and the interpretation is that for states with shall issue laws the violent crime rate is 36% lower than the crime rate for states with no shall issue laws.
+- We know that pooled OLS has an overstated reliability in the presence of serial correlation and heteroskedasticity.
+
+## Pooled OLS with Cluster-Robust Standard Errors
+```{r Pooled OLS with robust errrors, echo=FALSE}
+#Standard Erros - clustered by States
+coeftest(pooled.ols, vcov = vcovHC(pooled.ols, type='HC1', cluster='group'))
+```
+Running the pooled OLS with cluster robust standard errors gives us the following interpretations:
+
+- Standard errors are significantly different from errors obtained from pooled OLS model without robust errors
+- This confirms the presence of serial correlations and heteroskedasticity
+- All the estimates are insignificant at alpha = 5% now because of the corrected bigger standard errors.(except for 'shall', 'pop' and 'incarc_rate')
+- Although it can be assumed that the estimates are now right, pooled OLS with robust standard errors doesn't account for endogeniety in the model
+- We can test for endogeneity to see if it exists in the model
+- The test of endogeneity can be done by running a Hausman test with 'Fixed Effects' and 'Random Effects' model estimates. If they are found to be significantly different, then we can safely conclude the presence of Endogeneity
+
+## Fixed Effects Model - Entity Fixed
+```{r Fixed Effects model - Entity Fixed, echo=FALSE}
+fe_form <- log(vio) ~ incarc_rate+pb1064+pw1064+pm1029+pop+avginc+density+shall
+
+fe.model.ef <- plm(fe_form, data, model = 'within', index = c("stateid","year"), effect = 'individual')
+summary(fe.model.ef)
+```
+RUnning the Fixed Effects model with Entity Fixed effects, we have the following takeaways:
+
+- The model is significant with an F-statistic of 35.6447 and R-sq = 20.3%
+- Estimates for 'pop', 'avginc', 'incarc_rate' are found insignificant at alpha=5%
+- Interpreting the estimate for 'shall', for states with shall-issue laws, the crime rate is 4.6% lesser than the crime rate in states with no shall-issue laws
+
+
+## Fixed Effects Model (Entity Fixed) + Robust Errors
+```{r Fixed Effects + Robust Errors, echo=FALSE}
+coeftest(fe.model.ef, vcov = vcovHC(fe.model.ef, type='HC1', cluster='group'))
+```
+- Though we have run a Fixed Effects model, we run the Fixed Effects model with Robust Standard Errors to account for heteroskedasticity and serial correlation to get the correct standard errors
+- We see that, the estimates for 'density' and 'shall' are no more significant in addition to the variables that were earlier deemed insignificant.('pop', 'avginc', 'incarc_rate')
+- Since only standard errors are corrected, the coefficient estimates remain the same.
+
+
+## Fixed Effects Model - Time Fixed
+```{r Fixed Effects model - time fixed effects, echo=FALSE}
+fe_form_tf <- log(vio) ~ incarc_rate+pb1064+pw1064+pm1029+pop+avginc+density+shall + factor(year)
+
+fe.model.tf <- plm(fe_form_tf, data, model = 'within', index = c("stateid","year"), effect = 'time')
+summary(fe.model.tf)
+```
+Running a Time Fixed effect model, we have the below interpretations:
+
+- The model is highly siginificant with an F-statistic of 197.19 and R-sq = 58%
+- The estimates of all the variables are significant with alpha=5% except 'density' and 'avginc'
+- The estimate for 'shall' is -0.28 which seems realistic and reasonable
+- Interpreting the estimate, for states with shall-issue laws, as compared to states with no shall-issue laws, the crime rate is 28% lower.
+- Other coefficient estimates are also reasonable and make sense
+
+
+## Fixed Effects Model (Time Fixed) + Robust Errors
+```{r Fixed Effects Model(Time) + Robust errors}
+coeftest(fe.model.tf, vcov = vcovHC(fe.model.tf, type='HC1', cluster='group'))
+```
+Running a Time Fixed effect model + Cluster Robust errors, we account for heteroskedasticity and have the below interpretations:
+
+- In addition to 'density' & 'avginc', the variables 'pm1029', 'pw1064' and 'pb1064' are deemed insignificant at alpha=5%
+- The estimate for 'shall' is -0.28 which seems realistic and reasonable
+- The estimates remain consistent as only standard errors are corrected.
+- The 'shall' coefficient estimate is reasonable and significant.
+
+
+## Fixed Effects model - Entity + Time fixed effects
+```{r Fixed Effects model - entity plus time fixed effects, echo=FALSE}
+fe_form <- log(vio) ~ incarc_rate+pb1064+pw1064+pm1029+pop+avginc+density+shall
+
+fe.model.eftf <- plm(fe_form, data, model = 'within', index = c("stateid","year"), effect = 'twoways')
+summary(fe.model.eftf)
+```
+Running a fixed effects model with both time and entity fixed effects gives the above results and is subject to following interpretations:
+
+- The model is significant with an F-statistic of 8.15 and R-sq = 5%
+- None of the estimates for all the variables are significant at alpha = 10% except 'pm1029'
+
+
+## Fixed Effects model (Entity + Time) + Cluster Standard Errors
+```{r Fixed (Entity + Time) + Cluster Errors}
+coeftest(fe.model.eftf, vcov = vcovHC(fe.model.eftf, type='HC1', cluster='group'))
+```
+Running a Fixed Effects model (Time + Entity) with Cluster Robust Standard Errors is subject to interpretations:
+- All estimates are now deemed insignificant with corrected standard errors.
+- This model, on the whole, is deemed insignificant as all estimates are insignificant.
+
+
+## Random Effects Model
+```{r Random Effects model, echo=FALSE}
+re_form <- log(vio) ~ incarc_rate+pb1064+pw1064+pm1029+pop+avginc+density+shall
+
+re.model <- plm(re_form, data, model = 'random', index = c("stateid","year"))
+summary(re.model)
+```
+Random Effects model
+
+- Though running a 'Random Effects' model doesn't make sense because we don't have random samples, we run it to understand if endogeneity is present in the model.
+- The estimates of the RE model is compared with the estimates of the FE model using an Hausman test wherein the null hypothesis states no endogeneity and the alternate hypothesis roots for the presence of endogeneity
+- In other words, the estimates for both models are expected to be the same in the absence of endogeneity
+- The RE model is significant with a chi-sq statistic of 337 and R-sq of 25%
+- All the coefficient estimates are significant at alpha = 10%
+
+
+## Test for Endogeneity - Hausman Test
+```{r Test for endogeneity, echo=FALSE}
+phtest(fe.model.ef, re.model)
+phtest(fe.model.tf, re.model)
+phtest(fe.model.eftf, re.model)
+```
+Conducting the Hausman Test for endogeneity, the following points can be concluded:
+
+- Hausman test is conducted for the following combinations
+  1. Random Effects Vs Fixed Effects (Entity fixed)
+  2. Random Effects Vs Fixed Effects (Time Fixed)
+  3. Random Effects Vs Fixed Effects (Entity Fixed and Time Fixed)
+- All the three tests provide the same result - Endogeneity is present
+- The second test has a very high chi-sq statistic of 414 which implies that the estimates are very different for each of the model
+  
+
+## Fixed Effects model with interaction terms + Cluster Errors
+```{r Fixed interactions, echo=FALSE}
+fe_form2 <- log(vio) ~ incarc_rate+pb1064+pw1064+pm1029+pop+avginc+density+shall+(shall*incarc_rate)
+
+fe.model.tf2 <- plm(fe_form2, data, model = 'within', index = c("stateid","year"), effect = 'time')
+summary(fe.model.tf2)
+coeftest(fe.model.tf2, vcov = vcovHC(fe.model.tf2, type='HC1', cluster='group'))
+```
+- The Fixed Effects model with Time fixed effects is supposed to be the right model because of the significance of the model and also thre reasonable estimate of 'shall'
+- We use this model as the base and explore with 'shall' as an interaction term with 'incarc_rate'
+- The estimate for 'shall' is -0.729 which suggests that for states with shall-issue laws the crime rate is 72.9% lower than crime rate in states without shall-issue laws
+- Also, interpreting the interaction term, for states with shall issue laws, the return on incarceration rate is 0.19% higher than for states with no shall-issue laws.
+
+
+## Fixed Effects model with quadratic term + Cluster Errors
+```{r Fixed quadratic, echo=FALSE}
+fe_form3 <- log(vio) ~ incarc_rate+pb1064+pw1064+pm1029+pop+avginc+density+shall+I(incarc_rate**2)
+
+fe.model.tf3 <- plm(fe_form3, data, model = 'within', index = c("stateid","year"), effect = 'time')
+summary(fe.model.tf3)
+coeftest(fe.model.tf3, vcov = vcovHC(fe.model.tf3, type='HC1', cluster='group'))
+```
+- In this model, we explore the effect of the presence of a quadratic term for incarc_rate
+- 'incarc_rate, 'incarc_rate^2', 'pop' and 'shall' are significant at alpha=5%
+- Interpreting 'shall' estimate, states with shall-issue laws have 24% lower crime rate than states without shall-issue laws.
+- There is a negative sign on incarc_rate^2 which suggests that past a point, incarc_rate decreases as crime rate increases 
+
+
+## Fixed Effects model with quadratic, interaction term + Cluster Errors
+```{r Fixed interactions + quadratic, echo=FALSE}
+fe_form4 <- log(vio) ~ incarc_rate+pb1064+pw1064+pm1029+pop+avginc+density+shall+I(incarc_rate**2)+(shall*incarc_rate)
+
+fe.model.tf4 <- plm(fe_form4, data, model = 'within', index = c("stateid","year"), effect = 'time')
+summary(fe.model.tf4)
+coeftest(fe.model.tf4, vcov = vcovHC(fe.model.tf4, type='HC1', cluster='group'))
+```
+With a model incorporating both quadratic and interaction terms with Cluster Robust standard errors, we have below interpretations
+
+- 'shall', 'incarc_rate', 'incarc_rate^2', 'incarc_rate*shall' are significant at alpha=5%
+- For states with shall-issue laws the crime rate is 49.5% lower than crime rate in states without shall-issue laws
+- For states with shall-issue laws, for 1 unit increase in incarceration rate the crime rate increases by 0.38% approx
+
+# Conclusion/Recommendations
+From our analysis we conclude/recommend the following
+
+1. The Time Fixed Effects model is the most accurate model. All the estimates for the variables are as expected and reasonable.
+2. Using it as the base, we can say that for states with shall-issue laws the crime rate is lower than the crime rate for staes without shall-issue laws.
+3. Hence, to answer the problem statement - 'Yes, shall-isse laws do reduce crime.
+4. Implementation of shall-issue laws is advised for the states without shall-issue laws, as its implementation will lead to a decrease in crime rate.
